@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import random
+import time
+from datetime import datetime, timezone
+from typing import Any
+
+
+class StationBase:
+    def __init__(self, name: str):
+        self.name = name
+        self.state = "RUN"
+        self.degradation_score = 0.0
+        self.health_score = 1.0
+        self.inputs: dict[str, Any] = {}
+        self.outputs: dict[str, Any] = {}
+        self.memory: dict[str, Any] = {
+            "cycle_active": False,
+            "fault": False,
+            "cycle_count": 0,
+        }
+        self.measurements: dict[str, Any] = {}
+        self.active_faults: dict[str, float] = {}
+        self.events: list[dict[str, Any]] = []
+        self._event_times: dict[str, float] = {}
+        self.process_state = "IDLE"
+        self.cycle_id = 0
+        self._resume_process_state: str | None = None
+        self.scenario_stage = "NORMAL"
+        self.scenario_target = 0.0
+        self.fault_count = 0
+        self._fault_history: set[str] = set()
+        self.state_seconds = {"RUN": 0.0, "DEGRADED": 0.0, "FAULT": 0.0, "FAILURE": 0.0, "MAINTENANCE": 0.0}
+        self.simulation_seconds = 0.0
+        self.baseline: dict[str, Any] = {}
+        self.last_cycle_started = time.monotonic()
+        self.current_cycle_time = 0.0
+        self.demo_mode = False
+        self.last_maintenance_at: str | None = None
+        self.wear_cycle_hours: float | None = None
+
+    def emit(self, code: str, severity: str = "WARNING", component: str | None = None,
+             details: dict[str, Any] | None = None, cooldown: float = 10.0) -> None:
+        now = time.monotonic()
+        if now - self._event_times.get(code, -float("inf")) < cooldown:
+            return
+        self._event_times[code] = now
+        self.events.append({
+            "code": code,
+            "severity": severity,
+            "component": component or "station",
+            "details": details or {},
+        })
+
+    def reset_events(self) -> None:
+        pass
+
+    def acknowledge_events(self) -> None:
+        self.events.clear()
+
+    def inject_fault(self, fault: str, severity: float = 0.5) -> None:
+        severity = max(0.0, min(1.0, severity))
+        if fault not in self._fault_history:
+            self.fault_count += 1
+            self._fault_history.add(fault)
+        self.active_faults[fault] = max(self.active_faults.get(fault, 0.0), severity)
+
+    def clear_fault(self, fault: str | None = None) -> None:
+        if fault is None:
+            self.active_faults.clear()
+        else:
+            self.active_faults.pop(fault, None)
+
+    def fault_severity(self, fault: str) -> float:
+        return self.active_faults.get(fault, 0.0)
+
+    def set_scenario(self, stage: str, severity: float = 0.0) -> None:
+        self.scenario_stage = stage
+        if stage == "NORMAL":
+            self.active_faults.clear()
+        self.scenario_target = max(0.0, min(1.0, severity))
+
+    def advance_wear(self, dt: float) -> None:
+        # The scenario target evolves over hours; smoothing avoids artificial jumps.
+        transition_rate = 1.0 / (300.0 if self.scenario_target > self.degradation_score else 120.0)
+        self.degradation_score += (self.scenario_target - self.degradation_score) * min(1.0, dt * transition_rate)
+        self.degradation_score = max(
+            0.0,
+            min(1.0, self.degradation_score + random.gauss(0.0, 0.00002 * max(dt, 0.001) ** 0.5)),
+        )
+        self.health_score = max(0.0, 1.0 - self.degradation_score)
+        if self.scenario_stage == "MAINTENANCE":
+            self.state = "MAINTENANCE"
+            self.memory["fault"] = False
+        elif self.degradation_score >= 0.90:
+            self.state = "FAILURE"
+            self.memory["fault"] = True
+        elif self.degradation_score >= 0.82:
+            self.state = "FAULT"
+            self.memory["fault"] = True
+        elif self.active_faults or self.degradation_score >= 0.45:
+            self.state = "DEGRADED"
+            self.memory["fault"] = False
+        else:
+            self.state = "RUN"
+            self.memory["fault"] = False
+        self.state_seconds.setdefault(self.state, 0.0)
+        self.state_seconds[self.state] += dt
+
+    def _noise(self, amplitude: float) -> float:
+        return random.gauss(0.0, amplitude)
+
+    def update(self, dt: float, now: float) -> None:
+        self.reset_events()
+        self.simulation_seconds += dt
+        self.advance_wear(dt)
+        interrupted_states = {"FAULT", "FAILURE", "MAINTENANCE"}
+        if self.state in interrupted_states:
+            if self.process_state not in {"FAULT", "MAINTENANCE"}:
+                self._resume_process_state = self.process_state
+            self.process_state = "MAINTENANCE" if self.state == "MAINTENANCE" else "FAULT"
+            self.memory["cycle_active"] = False
+            for output in self.outputs:
+                self.outputs[output] = False
+            return
+        if self.process_state in {"FAULT", "MAINTENANCE"} and self._resume_process_state:
+            self.process_state = self._resume_process_state
+            self._resume_process_state = None
+        self.step(dt, now)
+
+    def step(self, dt: float, now: float) -> None:
+        raise NotImplementedError
+
+    def get_payload(self) -> dict[str, Any]:
+        planned_seconds = max(0.0, self.simulation_seconds - self.state_seconds.get("MAINTENANCE", 0.0))
+        downtime_seconds = self.state_seconds.get("FAULT", 0.0) + self.state_seconds.get("FAILURE", 0.0)
+        availability = (planned_seconds - downtime_seconds) / planned_seconds * 100.0 if planned_seconds else 100.0
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "station": self.name,
+            "state": self.state,
+            "inputs": self.inputs.copy(),
+            "outputs": self.outputs.copy(),
+            "memory": self.memory.copy(),
+            "operational": {
+                "operational_state": self.process_state,
+                "cycle_count": self.memory["cycle_count"],
+                "cycle_rate_per_min": round(self.memory["cycle_count"] / self.simulation_seconds * 60.0, 2) if self.simulation_seconds else 0.0,
+                "fault_count": self.fault_count,
+                "availability_pct": round(max(0.0, availability), 2),
+                "data_quality": "GOOD",
+                "state_seconds": {key: round(value, 2) for key, value in self.state_seconds.items()},
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+            },
+            "process": {
+                "state": self.process_state,
+                "cycle_active": self.memory["cycle_active"],
+                "cycle_id": self.cycle_id,
+            },
+            "measurements": self.measurements.copy(),
+            "baseline": self.baseline.copy(),
+            "health": {
+                "state": self.state,
+                "score": round(self.health_score, 3),
+                "degradation_score": round(self.degradation_score, 3),
+                "risk_level": "CRITICAL" if self.health_score < 0.25 else ("HIGH" if self.health_score < 0.6 else ("MEDIUM" if self.health_score < 0.8 else "LOW")),
+                "active_faults": self.active_faults.copy(),
+                "components": self.component_health(),
+                "target_degradation": round(self.scenario_target, 3),
+                "demo_mode": self.demo_mode,
+                "last_maintenance_at": self.last_maintenance_at,
+                "wear_cycle_hours": self.wear_cycle_hours,
+            },
+            "events": self.events.copy(),
+        }
+
+    def component_health(self) -> dict[str, float]:
+        return {"conveyor": round(self.health_score, 3)}

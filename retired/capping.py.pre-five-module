@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import random
+
+from stations.base import StationBase
+from simulation.models import ProductionLine
+
+
+class CappingStation(StationBase):
+    """Final module: places and verifies the cap on each filled bottle."""
+
+    def __init__(self, line: ProductionLine):
+        super().__init__("Capping")
+        self.line = line
+        self.timer = 0.0
+        self.base_cycle = 1.1
+        self.nominal_torque_nm = 1.2
+        self.cap_magazine_count = 120
+        self.inputs = {
+            "bottle_present": False,
+            "cap_present": True,
+            "cap_seated": False,
+            "torque_ok": True,
+        }
+        self.outputs = {
+            "conveyor": False,
+            "cap_feeder": False,
+            "capping_head": False,
+        }
+        self.baseline = {
+            "capping_time_s": self.base_cycle,
+            "cap_torque_nm": self.nominal_torque_nm,
+            "cap_height_error_mm": 0.0,
+        }
+
+    def step(self, dt: float, now: float) -> None:
+        self.inputs["bottle_present"] = bool(self.line.filled_queue)
+        self.inputs["cap_present"] = self.cap_magazine_count > 0
+        self.inputs["cap_seated"] = False
+        self.outputs["conveyor"] = bool(self.line.filled_queue)
+
+        if not self.line.filled_queue:
+            self.process_state = "IDLE"
+            self.memory["cycle_active"] = False
+            self.timer = 0.0
+            return
+
+        self.process_state = "CAPPING"
+        self.memory["cycle_active"] = True
+        self.outputs["cap_feeder"] = True
+        self.outputs["capping_head"] = True
+        self.timer += dt
+
+        fault = self.fault_severity("capper_wear")
+        target = self.base_cycle * (1.0 + self.degradation_score * 0.35 + fault * 0.8)
+        if self.timer < target:
+            return
+
+        if self.cap_magazine_count <= 0:
+            self.cap_magazine_count = 120
+            self.emit("CAP_MAGAZINE_REFILLED", severity="INFO", component="cap_feeder")
+
+        bottle = self.line.filled_queue.pop(0)
+        self.cap_magazine_count -= 1
+        torque = self.nominal_torque_nm * (1.0 - self.degradation_score * 0.08 - fault * 0.35)
+        torque += random.gauss(0.0, 0.015 + fault * 0.04)
+        height_error = random.gauss(fault * 2.2 + self.degradation_score * 0.15, 0.08 + fault * 0.18)
+        reject_probability = 0.002 + self.degradation_score * 0.008 + fault ** 2 * 0.35
+        cap_ok = (
+            random.random() > reject_probability
+            and 0.9 <= torque <= 1.45
+            and abs(height_error) <= 1.4
+        )
+
+        self.measurements["capping_time_s"] = round(self.timer, 3)
+        self.measurements["cap_torque_nm"] = round(torque, 3)
+        self.measurements["cap_height_error_mm"] = round(height_error, 3)
+        self.measurements["cap_present"] = True
+
+        if cap_ok:
+            bottle.state = "CAPPED"
+            self.inputs["cap_seated"] = True
+            self.inputs["torque_ok"] = True
+            self.line.total_good += 1
+            self.line.total_produced += 1
+            self.emit("BOTTLE_CAPPED", severity="INFO", component="capping_head", cooldown=30.0)
+        else:
+            bottle.state = "CAP_REJECT"
+            self.inputs["torque_ok"] = False
+            self.line.total_rejects += 1
+            self.emit(
+                "CAP_QUALITY_REJECT",
+                severity="WARNING",
+                component="capping_head",
+                details={"torque_nm": round(torque, 3), "height_error_mm": round(height_error, 3)},
+            )
+
+        bottle.history.append({
+            "timestamp": now,
+            "event": bottle.state,
+            "torque_nm": round(torque, 3),
+        })
+        self.line.completed_bottles.append(bottle)
+        self.memory["cycle_count"] += 1
+        self.memory["cycle_active"] = False
+        self.timer = 0.0
+        self.outputs["cap_feeder"] = False
+        self.outputs["capping_head"] = False
+        self.inputs["cap_seated"] = False
+        self.process_state = "IDLE"
+
+    def component_health(self) -> dict[str, float]:
+        head = max(0.0, 1.0 - self.degradation_score - self.fault_severity("capper_wear"))
+        return {
+            "capping_head": round(head, 3),
+            "cap_feeder": round(self.health_score, 3),
+            "torque_sensor": round(max(0.0, head + 0.05), 3),
+            "conveyor": round(self.health_score, 3),
+        }
+

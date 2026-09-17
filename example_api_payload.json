@@ -1,0 +1,25 @@
+{
+  "station": "Bottling",
+  "state": "DEGRADED",
+  "process": {"state": "FILLING", "cycle_active": true, "cycle_id": 15},
+  "outputs": {"conveyor_motor": false, "dosing_valve": true, "stopper_cylinder": true},
+  "measurements": {"flow_ml_s": 218.0, "fill_volume_ml": 436.0, "fill_error_ml": -4.2, "valve_open_time_s": 2.0, "tank_level_ml": 5230.0, "tank_level_pct": 65.38},
+  "baseline": {"fill_volume_ml": 500.0, "valve_open_time_s": 2.083, "flow_ml_s": 240.0, "tank_level_ml": 8000.0},
+  "health": {
+    "state": "DEGRADED",
+    "score": 0.552,
+    "degradation_score": 0.448,
+    "risk_level": "HIGH",
+    "active_faults": {"valve_flow_loss": 0.32, "valve_stiction": 0.18},
+    "components": {"dosing_valve": 0.48, "tank_level_sensor": 0.592, "stopper_cylinder": 0.552, "conveyor": 0.552},
+    "target_degradation": 0.45,
+    "demo_mode": false,
+    "last_maintenance_at": null,
+    "wear_cycle_hours": 168.0
+  },
+  "events": [{"code": "FILL_VOLUME_OUT_OF_TOLERANCE", "severity": "WARNING", "component": "dosing_valve", "details": {"volume_ml": 472.0}}],
+  "line": {
+    "wip": {"distributing_to_separating": 1, "separating_to_bottling": 2, "bottling_to_pick_place": 0, "pick_place_to_sorting": 1, "total": 4},
+    "production": {"total": 87, "good": 84, "rejects": 3, "diverted": 17, "quality_rate": 0.966}
+  }
+}
