@@ -35,21 +35,6 @@ python3 -m venv venv
 ./venv/bin/python main.py
 ```
 
-Environment variables:
-
-```bash
-DB_HOST=172.31.32.65
-DB_USER=sensor_app
-DB_PASS='SenzorPass123!'
-DB_NAME=industrial_db
-SIM_TICK=0.1
-TELEMETRY_INTERVAL=0.5
-AUTO_FAULTS=1
-WEAR_CYCLE_HOURS=168
-MAINTENANCE_MINUTES=20
-WEAR_START=0.04
-WEAR_PEAK=0.92
-```
 
 Wear develops continuously over `WEAR_CYCLE_HOURS`; the visible health stages
 are `NORMAL`, `EARLY_WEAR`, `DEGRADED`, `CRITICAL`, and `FAILURE`. A planned
